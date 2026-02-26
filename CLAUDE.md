@@ -61,12 +61,12 @@ Persistent state is stored in `~/.config/remote-mode/state` (`local` or `remote`
 | `~/.config/sunshine/sunshine.conf` | Sunshine config; `output_name` key selects which display to stream |
 | `~/.config/remote-mode/state` | Persisted mode (`local` / `remote`) |
 | `~/.config/remote-mode/backup.conf` | Pre-`cmd_up` snapshot of `sunshine.conf` for rollback |
-| `/Applications/Sunshine.app/Contents/MacOS/sunshine` | Sunshine binary (for `--list-displays`) |
+| `/opt/homebrew/opt/sunshine/bin/sunshine` | Sunshine binary (for `--list-displays`); installed via `brew install lizardbyte/homebrew/sunshine` |
 
 ## Dependencies
 
 All checked at startup by `check_deps()`:
 - `betterdisplaycli` — controls virtual display on/off and physical display brightness
-- Sunshine binary at the hardcoded path above
+- Sunshine binary at `/opt/homebrew/opt/sunshine/bin/sunshine` (install via `brew tap lizardbyte/homebrew && brew install lizardbyte/homebrew/sunshine`)
 - `brew` — used to restart the Sunshine service (`brew services restart sunshine`)
 - `tailscale` — optional, only shown in `remote-status`

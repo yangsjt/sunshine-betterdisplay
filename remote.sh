@@ -4,19 +4,20 @@ set -euo pipefail
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-SUNSHINE_BIN="/Applications/Sunshine.app/Contents/MacOS/sunshine"
+SUNSHINE_BIN="/opt/homebrew/opt/sunshine/bin/sunshine"
 SUNSHINE_CONF="$HOME/.config/sunshine/sunshine.conf"
 STATE_DIR="$HOME/.config/remote-mode"
 STATE_FILE="$STATE_DIR/state"
 BACKUP_CONF="$STATE_DIR/backup.conf"
 
-VIRTUAL_NAME_LIKE="Virtual"
+BDBIN="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
+VIRTUAL_NAME_LIKE="虚拟"
 PHYSICAL_NAME_LIKE="LG"
-VIRTUAL_KEYWORD="BetterDisplay"
+SUNSHINE_LOG="$HOME/.config/sunshine/sunshine.log"
 DISPLAY_SETTLE_SECS=4
 SUNSHINE_SETTLE_SECS=2
 REMOTE_BRIGHTNESS=0
-LOCAL_BRIGHTNESS=100
+LOCAL_BRIGHTNESS=1
 
 # ──────────────────────────────────────────────
 # Helpers
@@ -40,8 +41,8 @@ info() {
 check_deps() {
     local missing=()
 
-    if ! command -v betterdisplaycli &>/dev/null; then
-        missing+=("betterdisplaycli")
+    if [[ ! -x "$BDBIN" ]]; then
+        missing+=("BetterDisplay.app (expected at $BDBIN)")
     fi
 
     if [[ ! -x "$SUNSHINE_BIN" ]]; then
@@ -131,18 +132,20 @@ restore_conf() {
 }
 
 # ──────────────────────────────────────────────
-# Parse BetterDisplay display index from --list-displays
+# Parse virtual display id from Sunshine log file
 # ──────────────────────────────────────────────
 parse_sunshine_index() {
-    local list="$1"
-    # Expected line format (example):
-    #   Index: 2 | Name: BetterDisplay Virtual Display
-    # We extract the first numeric index whose Name line contains VIRTUAL_KEYWORD.
-    echo "$list" \
-        | grep -i "$VIRTUAL_KEYWORD" \
-        | grep -o 'Index:[[:space:]]*[0-9]*' \
-        | grep -o '[0-9]*' \
-        | head -1 \
+    # Sunshine 2025.x logs display detection at startup:
+    #   Info: Detected display: Virtual 16:10 (id: 16) connected: true
+    # We grep for lines matching VIRTUAL_NAME_LIKE and extract the id number.
+    if [[ ! -f "$SUNSHINE_LOG" ]]; then
+        return
+    fi
+    grep "Detected display:" "$SUNSHINE_LOG" 2>/dev/null \
+        | grep -i "$VIRTUAL_NAME_LIKE" \
+        | tail -1 \
+        | grep -oE '\(id:[[:space:]]*[0-9]+\)' \
+        | grep -oE '[0-9]+' \
         || true
 }
 
@@ -157,8 +160,8 @@ rollback() {
     _ROLLBACK_DONE=true
     warn "Rolling back to local mode …"
     restore_conf || true
-    betterdisplaycli set -namelike="$VIRTUAL_NAME_LIKE" -state=off || true
-    betterdisplaycli set -namelike="$PHYSICAL_NAME_LIKE" -brightness="$LOCAL_BRIGHTNESS" || true
+    "$BDBIN" set -type=VirtualScreen -connected=off || true
+    "$BDBIN" set -nameLike="$PHYSICAL_NAME_LIKE" -brightness="$LOCAL_BRIGHTNESS" || true
     brew services restart sunshine || true
     state_write "local"
     warn "Rollback complete."
@@ -186,7 +189,13 @@ cmd_up() {
 
     # 1. Enable virtual display and set as main
     info "Activating virtual display …"
-    betterdisplaycli set -namelike="$VIRTUAL_NAME_LIKE" -state=on -main
+    local vconn
+    vconn="$("$BDBIN" get -type=VirtualScreen -connected 2>/dev/null || true)"
+    if [[ "$vconn" != "on" ]]; then
+        "$BDBIN" set -type=VirtualScreen -connected=on
+    fi
+    sleep 1
+    "$BDBIN" set -type=VirtualScreen -main=on
 
     # 2. Wait for display layout to stabilise
     info "Waiting ${DISPLAY_SETTLE_SECS}s for display layout to settle …"
@@ -194,27 +203,28 @@ cmd_up() {
 
     # 3. Dim physical display
     info "Dimming physical display (brightness → ${REMOTE_BRIGHTNESS}) …"
-    betterdisplaycli set -namelike="$PHYSICAL_NAME_LIKE" -brightness="$REMOTE_BRIGHTNESS"
+    "$BDBIN" set -nameLike="$PHYSICAL_NAME_LIKE" -brightness="$REMOTE_BRIGHTNESS"
 
-    # 4. Discover virtual display index in Sunshine
-    info "Querying Sunshine display list …"
-    local display_list
-    display_list="$("$SUNSHINE_BIN" --list-displays 2>&1)" || true
+    # 4. Discover virtual display id from Sunshine log
+    # Restart Sunshine so it re-detects displays with virtual display now active as main.
+    info "Restarting Sunshine to detect updated display layout …"
+    brew services restart sunshine
+    sleep 5
 
     local target_index
-    target_index="$(parse_sunshine_index "$display_list")"
+    target_index="$(parse_sunshine_index)"
 
     if [[ -z "$target_index" ]] || ! [[ "$target_index" =~ ^[0-9]+$ ]]; then
-        die "Could not determine BetterDisplay index from Sunshine. Output was:\n${display_list}"
+        die "Could not determine virtual display id from Sunshine log ($SUNSHINE_LOG). Check that Sunshine started correctly."
     fi
 
-    info "BetterDisplay index in Sunshine: $target_index"
+    info "Virtual display id in Sunshine: $target_index"
 
     # 5. Update sunshine.conf (atomic)
     conf_set "output_name" "$target_index"
 
-    # 6. Restart Sunshine service
-    info "Restarting Sunshine …"
+    # 6. Restart Sunshine so it streams the correct display
+    info "Restarting Sunshine with output_name = ${target_index} …"
     brew services restart sunshine
     sleep "$SUNSHINE_SETTLE_SECS"
 
@@ -232,7 +242,7 @@ cmd_down() {
     info "Returning to local mode …"
 
     # Each step is best-effort; we continue even on failure
-    if betterdisplaycli set -namelike="$VIRTUAL_NAME_LIKE" -state=off 2>/dev/null; then
+    if "$BDBIN" set -type=VirtualScreen -connected=off 2>/dev/null; then
         info "Virtual display deactivated."
     else
         warn "Could not deactivate virtual display; continuing …"
@@ -240,7 +250,7 @@ cmd_down() {
 
     sleep 2
 
-    if betterdisplaycli set -namelike="$PHYSICAL_NAME_LIKE" -brightness="$LOCAL_BRIGHTNESS" 2>/dev/null; then
+    if "$BDBIN" set -nameLike="$PHYSICAL_NAME_LIKE" -brightness="$LOCAL_BRIGHTNESS" 2>/dev/null; then
         info "Physical display brightness restored to ${LOCAL_BRIGHTNESS}."
     else
         warn "Could not restore brightness; continuing …"
@@ -275,11 +285,11 @@ cmd_status() {
     printf '\n--- Sunshine process ---\n'
     pgrep -fl sunshine || echo "(not running)"
 
-    printf '\n--- Display list (from Sunshine) ---\n'
-    if [[ -x "$SUNSHINE_BIN" ]]; then
-        "$SUNSHINE_BIN" --list-displays 2>&1 || echo "(error querying displays)"
+    printf '\n--- Display list (from Sunshine log) ---\n'
+    if [[ -f "$SUNSHINE_LOG" ]]; then
+        grep "Detected display:" "$SUNSHINE_LOG" 2>/dev/null | tail -20 || echo "(no display entries in log)"
     else
-        echo "(Sunshine binary not found at $SUNSHINE_BIN)"
+        echo "(log not found at $SUNSHINE_LOG)"
     fi
 
     printf '\n--- Tailscale ---\n'
